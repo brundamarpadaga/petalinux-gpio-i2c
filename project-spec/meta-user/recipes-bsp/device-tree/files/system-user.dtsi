@@ -1,0 +1,20 @@
+/include/ "system-conf.dtsi"
+/ {
+	chosen {
+		bootargs = "earlycon console=ttyPS0,115200 earlyprintk root=/dev/mmcblk0p2 rw rootwait";
+	};
+};
+
+&axi_iic_0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay"; 
+
+	oled: ssd1306@3c {
+        compatible = "solomon,ssd1306fb-i2c";
+        reg = <0x3c>;
+        solomon,height = <64>;
+        solomon,width = <128>;
+        solomon,page-offset = <0>;
+    };
+};
