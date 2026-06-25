@@ -375,6 +375,7 @@ A missing interrupt connection in Vivado (AXI IIC interrupt not wired to `IRQ_F2
 - Wrote SSD1306 OLED driver from datasheet, implementing I2C protocol, framebuffer management, and GDDRAM addressing
 - Developed and cross-compiled a custom GPIO LED control app using `petalinux-create -t apps`
 
+
 ## Acknowledgements
 
 AI assistance (code generation, debugging guidance, project architecture) provided by [Claude](https://claude.ai) (Anthropic).
