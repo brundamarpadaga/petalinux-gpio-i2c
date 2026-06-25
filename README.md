@@ -376,9 +376,9 @@ A missing interrupt connection in Vivado (AXI IIC interrupt not wired to `IRQ_F2
 - Developed and cross-compiled a custom GPIO LED control app using `petalinux-create -t apps`
 
 
-## Acknowledgements
+### Acknowledgements
 
-AI assistance (code generation, debugging guidance, project architecture) provided by [Claude](https://claude.ai) (Anthropic).
+- AI assistance (code generation, debugging guidance, project architecture) provided by [Claude](https://claude.ai) (Anthropic).
 ---
 
 ## Author
