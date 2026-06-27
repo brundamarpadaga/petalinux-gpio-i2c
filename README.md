@@ -217,7 +217,7 @@ ping -c 4 8.8.8.8
 
 ### Goal
 
-Read temperature and humidity from a BME280 sensor over I2C and publish the data to HiveMQ cloud broker via MQTT over Ethernet, on a timed interval. Optionally display current readings on the SSD1306 OLED locally.
+Read temperature and humidity from a BME280 sensor over I2C and publish the data to HiveMQ Cloud broker via MQTT over Ethernet, on a timed interval. Optionally display current readings on the SSD1306 OLED locally.
 
 ### Target Architecture
 
@@ -225,10 +225,10 @@ Read temperature and humidity from a BME280 sensor over I2C and publish the data
 [BME280 sensor]
       │ I2C (same bus as OLED, or second Pmod)
       ▼
-[PetaLinux C app: sensor_publisher]
+[PetaLinux C app: mqtt-sensor-app]
       │ reads + formats JSON
       ▼
-[MQTT publish via libpaho-mqtt]
+[MQTT publish via paho-mqtt-c over TLS]
       │ eth0
       ▼
 [HiveMQ Cloud broker]
@@ -237,9 +237,9 @@ Read temperature and humidity from a BME280 sensor over I2C and publish the data
 [Web dashboard / Grafana]
 ```
 
-### Step-by-Step Plan
+### Progress
 
-- [ ] **Step 1 — Verify Ethernet** (see [Ethernet Setup](#ethernet-setup) above — needs cable)
+- [x] **Step 1 — Verify Ethernet** — `eth0` confirmed working, DHCP lease obtained, internet reachable
 - [ ] **Step 2 — Wire BME280** to a Pmod connector (same I2C bus or a second one)
   - Pull SDO pin to GND → I2C address `0x76`
   - Pull SDO pin to VCC → I2C address `0x77`
@@ -250,46 +250,50 @@ Read temperature and humidity from a BME280 sensor over I2C and publish the data
   ```
 - [ ] **Step 4 — Write BME280 userspace reader** using `i2c-dev`
   - Read raw ADC values from BME280 registers
-  - Apply BME280 compensation formula from datasheet (pseudocode provided in datasheet section 4.2.3)
+  - Apply BME280 compensation formula from datasheet (section 4.2.3)
   - Same pattern as the SSD1306 app, but reading data instead of writing display commands
-- [ ] **Step 5 — Add libpaho-mqtt to rootfs**
-  ```bash
-  petalinux-config -c rootfs
-  # Search for: paho-mqtt
-  # Enable: [*] paho-mqtt-c
+- [x] **Step 5 — Add paho-mqtt-c to rootfs**
+  - `paho-mqtt-c 1.3.8` sourced from `meta-openembedded/meta-oe` (already in bblayers)
+  - Built with `-DPAHO_WITH_SSL=ON` — TLS support included
+  - `ca-certificates` added to rootfs for server certificate verification
+  - Added to `project-spec/meta-user/conf/user-rootfsconfig`
+- [x] **Step 6 — Write mqtt-sensor-app** (`recipes-apps/mqtt-sensor-app/`)
+  - Publishes mock sensor data (`temp=25.0°C`, `humidity=60.0%`) as JSON to topic `zynq/sensor/bme280`
+  - Connects to HiveMQ Cloud over TLS (port 8883) with username/password auth
+  - Credentials stored in `/etc/mqtt-sensor.conf` — not hardcoded, gitignored
+  - CA cert path explicitly set: `ssl_opts.trustStore = "/etc/ssl/certs/ca-certificates.crt"`
+  - Publishes every 5 seconds; graceful shutdown on `SIGINT`/`SIGTERM`
   ```
-  Or add a BitBake recipe (same pattern as `oled-gpio-app.bb`)
-- [ ] **Step 6 — Write sensor_publisher.c**
-  ```c
-  // Pseudocode structure
-  while (1) {
-      float temp     = bme280_read_temperature(i2c_fd);
-      float humidity = bme280_read_humidity(i2c_fd);
-
-      // Format payload
-      snprintf(payload, sizeof(payload),
-               "{\"temperature\": %.2f, \"humidity\": %.2f}", temp, humidity);
-
-      // Publish to HiveMQ
-      MQTTClient_publishMessage(client, "zybo/sensors", &pubmsg, &token);
-
-      sleep(10);
-  }
+  # Config file format (on target at /etc/mqtt-sensor.conf)
+  broker=ssl://<cluster>.s1.eu.hivemq.cloud:8883
+  username=<user>
+  password=<password>
   ```
-- [ ] **Step 7 — Set up HiveMQ Cloud**
-  - Free tier at console.hivemq.cloud
-  - Create a cluster, get broker URL + credentials
-  - Create topics: `zybo/sensors/temperature`, `zybo/sensors/humidity`
-- [ ] **Step 8 — Test end-to-end**
-  - Use HiveMQ web client to subscribe and watch live data
-- [ ] **Step 9 (optional) — Display readings on OLED**
-  - Show current temp/humidity on SSD1306 while simultaneously publishing to cloud
+- [x] **Step 7 — Set up HiveMQ Cloud**
+  - Free cluster provisioned at `console.hivemq.cloud`
+  - Subscribe to `zynq/sensor/bme280` in the HiveMQ web client to monitor live data
+- [ ] **Step 8 — Test end-to-end** — deploy binary to board and confirm publish reaches HiveMQ web client
+- [ ] **Step 9 — Swap in real BME280 reads** — replace mock values with actual I2C reads (same `i2c-dev` pattern as SSD1306)
+- [ ] **Step 10 (optional) — Display readings on OLED** — show temp/humidity on SSD1306 while simultaneously publishing to cloud
+
+### New Files Added
+
+```
+project-spec/meta-user/
+└── recipes-apps/mqtt-sensor-app/
+    ├── mqtt-sensor-app.bb              # BitBake recipe (depends on paho-mqtt-c)
+    └── files/
+        ├── mqtt-sensor-app.c           # Publisher app source
+        ├── Makefile                    # Links -lpaho-mqtt3cs (SSL variant)
+        ├── mqtt-sensor.conf            # Real credentials — gitignored
+        └── mqtt-sensor.conf.example    # Placeholder template — tracked in git
+```
 
 ### Notes
 
 - No Vivado changes needed for Ethernet — GEM0 is PS-native
 - BME280 uses same I2C interface already proven with SSD1306
-- `libcurl` is an alternative to paho-mqtt if HTTP/REST (e.g., ThingSpeak) is preferred
+- Linking `-lpaho-mqtt3cs` (not `-lpaho-mqtt3c`) is required — the `s` suffix means SSL
 
 ---
 

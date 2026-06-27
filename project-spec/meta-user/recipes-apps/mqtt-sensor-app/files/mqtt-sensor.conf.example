@@ -1,0 +1,6 @@
+# MQTT broker connection settings
+# Copy this file to mqtt-sensor.conf and fill in your credentials
+
+broker=ssl://YOUR_CLUSTER.s1.eu.hivemq.cloud:8883
+username=YOUR_USERNAME
+password=YOUR_PASSWORD

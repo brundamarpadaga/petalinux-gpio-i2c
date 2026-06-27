@@ -11,3 +11,6 @@ pre-built/linux/
 *.log
 /components/plnx_workspace
 /components/yocto
+
+# MQTT credentials — do not commit
+project-spec/meta-user/recipes-apps/mqtt-sensor-app/files/mqtt-sensor.conf
