@@ -272,21 +272,36 @@ Read temperature and humidity from a BME280 sensor over I2C and publish the data
 - [x] **Step 7 — Set up HiveMQ Cloud**
   - Free cluster provisioned at `console.hivemq.cloud`
   - Subscribe to `zynq/sensor/bme280` in the HiveMQ web client to monitor live data
-- [ ] **Step 8 — Test end-to-end** — deploy binary to board and confirm publish reaches HiveMQ web client
-- [ ] **Step 9 — Swap in real BME280 reads** — replace mock values with actual I2C reads (same `i2c-dev` pattern as SSD1306)
+- [x] **Step 8 — Test end-to-end** — deployed binary to board, confirmed publish reaches HiveMQ (see "TLS publish failing" below for the blocker that had to be fixed first)
+- [x] **Step 9 — Write BME280 driver** — `read_sensor()` now does real forced-mode I2C reads + Bosch datasheet §4.2.3 compensation (temp + humidity; pressure intentionally skipped since it's not published). Written without hardware in hand — **not yet verified on a real sensor**. Before trusting readings: run `i2cdetect -y 1` to confirm the sensor answers at `0x76` (update `BME280_ADDR` to `0x77` in `mqtt-sensor-app.c` if it's wired with SDO pulled to VCC instead), then check for `BME280: unexpected chip ID` in the app's output — that means address/wiring is wrong before compensation math is even a question.
 - [ ] **Step 10 (optional) — Display readings on OLED** — show temp/humidity on SSD1306 while simultaneously publishing to cloud
+
+### Troubleshooting: TLS publish failing with `rc=-1`
+
+`mqtt-sensor-app` connected fine over TCP but failed the TLS handshake (`Failed to connect, rc=-1`) even with valid HiveMQ credentials and a correct CA trust store path.
+
+**Root cause:** the Zybo Z7-20 has no battery-backed RTC. On boot, `date` read back `Fri Mar 9 2018` (`hwclock -r` confirms: `Cannot access the Hardware Clock via any known method`). With `ssl_opts.enableServerCertAuth = 1`, OpenSSL rejects the HiveMQ server certificate because the board's clock predates the certificate's validity window. Manually forcing the clock to the real date (`date -s "<current date>"`) before launching the app immediately fixed it — confirming the clock, not credentials or networking, was the blocker.
+
+**Fix:** added the `ntpdate` package (from the `ntp` recipe in `meta-networking`, already present in `bblayers.conf`) via `user-rootfsconfig` / `rootfs_config`. `ntpdate` ships a hook at `/etc/network/if-up.d/ntpdate-sync` that `ifupdown` runs automatically the moment `eth0` gets its DHCP lease at boot (`/etc/network/interfaces` already has `auto eth0` / `iface eth0 inet dhcp`, brought up by the existing `S01networking` init script) — no custom init script needed. The stock `ntpdate.default` ships with an empty `NTPSERVERS`, which makes the hook silently no-op, so `project-spec/meta-user/recipes-support/ntp/ntp_%.bbappend` overrides it with real servers:
+```
+NTPSERVERS="pool.ntp.org time.google.com"
+```
+**Verified on hardware:** after rebuild + reflash, the board syncs its clock automatically on boot and `mqtt-sensor-app` publishes successfully with no manual `date -s` step required.
 
 ### New Files Added
 
 ```
 project-spec/meta-user/
-└── recipes-apps/mqtt-sensor-app/
-    ├── mqtt-sensor-app.bb              # BitBake recipe (depends on paho-mqtt-c)
-    └── files/
-        ├── mqtt-sensor-app.c           # Publisher app source
-        ├── Makefile                    # Links -lpaho-mqtt3cs (SSL variant)
-        ├── mqtt-sensor.conf            # Real credentials — gitignored
-        └── mqtt-sensor.conf.example    # Placeholder template — tracked in git
+├── recipes-apps/mqtt-sensor-app/
+│   ├── mqtt-sensor-app.bb              # BitBake recipe (depends on paho-mqtt-c)
+│   └── files/
+│       ├── mqtt-sensor-app.c           # Publisher app source
+│       ├── Makefile                    # Links -lpaho-mqtt3cs (SSL variant)
+│       ├── mqtt-sensor.conf            # Real credentials — gitignored
+│       └── mqtt-sensor.conf.example    # Placeholder template — tracked in git
+└── recipes-support/ntp/
+    ├── ntp_%.bbappend                  # Overrides ntpdate's default (empty) NTP server list
+    └── files/ntpdate.default           # NTPSERVERS="pool.ntp.org time.google.com"
 ```
 
 ### Notes
@@ -333,6 +348,35 @@ zcat /proc/config.gz | grep CONFIG_MACB
 ls /sys/bus/platform/drivers/
 ```
 
+### Network / Time Sync Diagnostics
+
+```bash
+# Check interface exists and link state (NO-CARRIER = cable unplugged)
+ip link show
+
+# Bring up eth0 and get a DHCP lease manually (run as root)
+sudo su
+udhcpc -i eth0
+# Should print: bound to <IP address>, and DNS servers being added to /etc/resolv.conf
+
+# Confirm internet reachability by IP
+ping -c 4 8.8.8.8
+
+# Check system clock (no battery-backed RTC on Zybo Z7-20 — boots with a stale/arbitrary time)
+date
+
+# Check hardware clock (expected to fail — confirms no RTC)
+hwclock -r
+
+# Force the clock to the real date/time — unblocks TLS testing without a rebuild
+date -s "YYYY-MM-DD HH:MM:SS"
+
+# Run the MQTT publisher manually and watch for connect/publish errors
+/usr/bin/mqtt-sensor-app
+# "Failed to connect, rc=-1" with a stale clock usually means TLS cert-date validation failed,
+# not bad credentials — verify by forcing the date above and re-running
+```
+
 ### Rebuild After Vivado Changes
 
 ```bash
@@ -369,6 +413,10 @@ A missing interrupt connection in Vivado (AXI IIC interrupt not wired to `IRQ_F2
 3. **Device tree layer** — verify node exists with correct properties
 4. **Driver layer** — confirm driver is compiled (`=y`) and probing
 5. **Application layer** — test with `i2cdetect` / `i2cget` / `ping`
+
+### No-RTC Boards and TLS
+
+Boards without a battery-backed RTC boot with an arbitrary/stale system clock. This is invisible for plaintext protocols but breaks any TLS client that validates certificate dates (`enableServerCertAuth`) — the handshake fails with a generic error (paho reported `rc=-1`) that doesn't obviously point to "wrong clock." `ifupdown`'s `/etc/network/if-up.d/` hooks are a convenient place to run one-shot time sync (e.g. `ntpdate`) right when the interface first gets a DHCP lease, before anything else tries to make a TLS connection.
 
 ### Technical Achievements
 

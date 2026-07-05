@@ -8,3 +8,4 @@ CONFIG_oled-gpio-app
 CONFIG_ca-certificates
 CONFIG_paho-mqtt-c
 CONFIG_mqtt-sensor-app
+CONFIG_ntpdate

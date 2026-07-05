@@ -3893,12 +3893,15 @@ CONFIG_Init-manager-sysvinit=y
 # apps 
 #
 CONFIG_gpio-app=y
+CONFIG_mqtt-sensor-app=y
 CONFIG_oled-gpio-app=y
 
 #
 # user packages 
 #
 # CONFIG_gpio-demo is not set
+CONFIG_paho-mqtt-c=y
+CONFIG_ntpdate=y
 # CONFIG_peekpoke is not set
 
 #
