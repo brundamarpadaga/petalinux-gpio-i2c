@@ -282,11 +282,16 @@ Read temperature and humidity from a BME280 sensor over I2C and publish the data
 
 **Root cause:** the Zybo Z7-20 has no battery-backed RTC. On boot, `date` read back `Fri Mar 9 2018` (`hwclock -r` confirms: `Cannot access the Hardware Clock via any known method`). With `ssl_opts.enableServerCertAuth = 1`, OpenSSL rejects the HiveMQ server certificate because the board's clock predates the certificate's validity window. Manually forcing the clock to the real date (`date -s "<current date>"`) before launching the app immediately fixed it — confirming the clock, not credentials or networking, was the blocker.
 
-**Fix:** added the `ntpdate` package (from the `ntp` recipe in `meta-networking`, already present in `bblayers.conf`) via `user-rootfsconfig` / `rootfs_config`. `ntpdate` ships a hook at `/etc/network/if-up.d/ntpdate-sync` that `ifupdown` runs automatically the moment `eth0` gets its DHCP lease at boot (`/etc/network/interfaces` already has `auto eth0` / `iface eth0 inet dhcp`, brought up by the existing `S01networking` init script) — no custom init script needed. The stock `ntpdate.default` ships with an empty `NTPSERVERS`, which makes the hook silently no-op, so `project-spec/meta-user/recipes-support/ntp/ntp_%.bbappend` overrides it with real servers:
+**First fix attempt (didn't actually work):** added the `ntpdate` package via `user-rootfsconfig` / `rootfs_config`, relying on its `/etc/network/if-up.d/ntpdate-sync` hook, which `ifupdown` is supposed to run automatically the moment `eth0` gets its DHCP lease (`S01networking` calls `ifup -a` at boot from `/etc/rc5.d/`, confirmed present and running). This looked like it worked in initial testing, but that was because the Ethernet cable happened to already be plugged in and a manual `date -s` fix from an earlier test was masking the real behavior. Once isolated with a clean test (stale clock forced, then `ifup eth0` alone), it turned out the hook script is completely correct and works fine when run **by hand** (`/etc/network/if-up.d/ntpdate-sync`) — but is **never invoked automatically** by boot. Root cause: this image's `ifup` is the BusyBox applet, which does not execute `/etc/network/if-up.d/` scripts despite the directory/symlink existing (a BusyBox limitation, not a config mistake).
+
+**Actual fix:** hook the clock sync into `/etc/udhcpc.d/` instead, which *is* run-parts'd by `udhcpc` itself (confirmed on hardware — it's the same mechanism that installs DNS servers via the stock `50default` script on every successful lease). Added `project-spec/meta-user/recipes-core/busybox/busybox_%.bbappend`, which installs a new `51ntpdate` script alongside busybox's own `50default` without modifying it:
+```sh
+[ "$1" = bound -o "$1" = renew ] && /usr/sbin/ntpdate -s -b pool.ntp.org time.google.com
+exit 0
 ```
-NTPSERVERS="pool.ntp.org time.google.com"
-```
-**Verified on hardware:** after rebuild + reflash, the board syncs its clock automatically on boot and `mqtt-sensor-app` publishes successfully with no manual `date -s` step required.
+The `ntpdate` package (still enabled via `user-rootfsconfig`) provides the binary; the old `recipes-support/ntp/ntp_%.bbappend` NTP-server override is now dead weight (nothing reads `/etc/default/ntpdate` anymore) but harmless — left in place rather than ripped out mid-debug.
+
+**Verified on hardware:** with the clock deliberately forced stale (`date -s "2018-03-09 12:00:00"`) then `ifdown eth0 && ifup eth0`, the clock self-corrected the moment `udhcpc` reached the `bound` state, with zero manual intervention. Next step: rebuild + reflash to bake this in, then confirm it also fires from a cold boot.
 
 ### New Files Added
 
@@ -299,9 +304,12 @@ project-spec/meta-user/
 │       ├── Makefile                    # Links -lpaho-mqtt3cs (SSL variant)
 │       ├── mqtt-sensor.conf            # Real credentials — gitignored
 │       └── mqtt-sensor.conf.example    # Placeholder template — tracked in git
-└── recipes-support/ntp/
-    ├── ntp_%.bbappend                  # Overrides ntpdate's default (empty) NTP server list
-    └── files/ntpdate.default           # NTPSERVERS="pool.ntp.org time.google.com"
+├── recipes-support/ntp/
+│   ├── ntp_%.bbappend                  # Overrides ntpdate's default (empty) NTP server list — vestigial, see Troubleshooting
+│   └── files/ntpdate.default           # NTPSERVERS="pool.ntp.org time.google.com"
+└── recipes-core/busybox/
+    ├── busybox_%.bbappend              # Adds 51ntpdate alongside busybox's own 50default udhcpc script
+    └── files/51ntpdate                 # Runs ntpdate on the udhcpc "bound"/"renew" event — the fix that actually works
 ```
 
 ### Notes
@@ -375,6 +383,15 @@ date -s "YYYY-MM-DD HH:MM:SS"
 /usr/bin/mqtt-sensor-app
 # "Failed to connect, rc=-1" with a stale clock usually means TLS cert-date validation failed,
 # not bad credentials — verify by forcing the date above and re-running
+
+# Test the boot-time clock-sync fix WITHOUT rebooting: this filesystem is an
+# in-memory initramfs (`mount | grep ' / '` shows `type rootfs`, not ext4), so
+# nothing written via the shell survives a reboot anyway — a live reboot test
+# only re-proves what's already baked into the flashed image. Instead, force a
+# fresh DHCP negotiation and watch the same udhcpc code path boot would use:
+date -s "2018-03-09 12:00:00"     # deliberately re-break the clock
+ifdown eth0 && ifup eth0          # forces a real "bound" event
+date                               # should self-correct if the fix is working
 ```
 
 ### Rebuild After Vivado Changes
@@ -416,7 +433,7 @@ A missing interrupt connection in Vivado (AXI IIC interrupt not wired to `IRQ_F2
 
 ### No-RTC Boards and TLS
 
-Boards without a battery-backed RTC boot with an arbitrary/stale system clock. This is invisible for plaintext protocols but breaks any TLS client that validates certificate dates (`enableServerCertAuth`) — the handshake fails with a generic error (paho reported `rc=-1`) that doesn't obviously point to "wrong clock." `ifupdown`'s `/etc/network/if-up.d/` hooks are a convenient place to run one-shot time sync (e.g. `ntpdate`) right when the interface first gets a DHCP lease, before anything else tries to make a TLS connection.
+Boards without a battery-backed RTC boot with an arbitrary/stale system clock. This is invisible for plaintext protocols but breaks any TLS client that validates certificate dates (`enableServerCertAuth`) — the handshake fails with a generic error (paho reported `rc=-1`) that doesn't obviously point to "wrong clock." `/etc/network/if-up.d/` hooks look like the obvious place to run one-shot time sync (e.g. `ntpdate`) the moment an interface gets a DHCP lease — but verify that mechanism actually fires on your image before trusting it: BusyBox's `ifup` applet doesn't execute those hooks at all, even though the directory and any installed hook scripts are present and individually functional. `/etc/udhcpc.d/` (run-parts'd by `udhcpc` itself, same place DNS servers get added) is the reliable equivalent on a BusyBox-based rootfs.
 
 ### Technical Achievements
 

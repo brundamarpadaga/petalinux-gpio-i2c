@@ -157,6 +157,9 @@ static int bme280_init(void) {
     bme280_write_reg(BME280_REG_CTRL_HUM, 0x01);
     bme280_write_reg(BME280_REG_CONFIG, 0x00);
 
+    printf("dig_H1=%u dig_H2=%d dig_H3=%u dig_H4=%d dig_H5=%d dig_H6=%d\n",
+           calib.dig_H1, calib.dig_H2, calib.dig_H3, calib.dig_H4, calib.dig_H5, calib.dig_H6);
+
     printf("BME280 initialized (chip ID 0x%02X)\n", chip_id);
     return 0;
 }

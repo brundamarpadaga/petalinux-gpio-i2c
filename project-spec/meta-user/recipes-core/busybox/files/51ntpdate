@@ -1,0 +1,13 @@
+#!/bin/sh
+# udhcpc hook: sync system clock once eth0 actually has a DHCP lease.
+#
+# This board has no battery-backed RTC, so it boots with a stale clock every
+# power cycle, which breaks TLS certificate date validation (mqtt-sensor-app).
+# The "correct" fix would be /etc/network/if-up.d/ntpdate-sync, but busybox's
+# ifup applet does not execute if-up.d hooks on this image (confirmed on
+# hardware: the script runs fine manually but is never invoked by `ifup -a`).
+# /etc/udhcpc.d/ IS run-parts'd by udhcpc itself (same mechanism that adds
+# DNS servers via 50default), so hook the clock sync in here instead.
+
+[ "$1" = bound -o "$1" = renew ] && /usr/sbin/ntpdate -s -b pool.ntp.org time.google.com
+exit 0
