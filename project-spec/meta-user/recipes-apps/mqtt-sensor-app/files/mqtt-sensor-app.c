@@ -185,6 +185,7 @@ static uint32_t bme280_compensate_humidity(int32_t adc_H) {
     v_x1 = v_x1 - (((((v_x1 >> 15) * (v_x1 >> 15)) >> 7) * (int32_t)calib.dig_H1) >> 4);
     v_x1 = (v_x1 < 0) ? 0 : v_x1;
     v_x1 = (v_x1 > 419430400) ? 419430400 : v_x1;
+    printf("humidity v_x1_final=%d\n", v_x1);
     return (uint32_t)(v_x1 >> 12);   /* %RH x1024 */
 }
 
@@ -204,7 +205,10 @@ static int read_sensor(float *temp, float *humidity) {
     int32_t adc_T = ((int32_t)data[0] << 12) | ((int32_t)data[1] << 4) | (data[2] >> 4);
     int32_t adc_H = ((int32_t)data[3] << 8) | data[4];
 
+    printf("raw: data[3]=0x%02X data[4]=0x%02X adc_H=%d adc_T=%d\n", data[3], data[4], adc_H, adc_T);
+
     int32_t  temp_x100  = bme280_compensate_temp(adc_T);
+    printf("t_fine=%d\n", t_fine);
     uint32_t hum_x1024  = bme280_compensate_humidity(adc_H);
 
     *temp     = temp_x100 / 100.0f;
