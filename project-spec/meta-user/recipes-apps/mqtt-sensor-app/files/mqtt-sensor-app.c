@@ -157,9 +157,6 @@ static int bme280_init(void) {
     bme280_write_reg(BME280_REG_CTRL_HUM, 0x01);
     bme280_write_reg(BME280_REG_CONFIG, 0x00);
 
-    printf("dig_H1=%u dig_H2=%d dig_H3=%u dig_H4=%d dig_H5=%d dig_H6=%d\n",
-           calib.dig_H1, calib.dig_H2, calib.dig_H3, calib.dig_H4, calib.dig_H5, calib.dig_H6);
-
     printf("BME280 initialized (chip ID 0x%02X)\n", chip_id);
     return 0;
 }
@@ -177,15 +174,18 @@ static int32_t bme280_compensate_temp(int32_t adc_T) {
 static uint32_t bme280_compensate_humidity(int32_t adc_H) {
     int32_t v_x1;
     v_x1 = (t_fine - (int32_t)76800);
+    /* The ">> 14" must bind to the RIGHT multiplicand only (Bosch reference formula).
+       Because '*' has higher precedence than '>>' in C, writing it as "(L * R) >> 14"
+       multiplies first and overflows int32 (~3.2e12), wrapping to garbage humidity.
+       The extra parens below keep it as "L * (R >> 14)", which stays within int32. */
     v_x1 = (((((adc_H << 14) - (((int32_t)calib.dig_H4) << 20) - (((int32_t)calib.dig_H5) * v_x1))
             + (int32_t)16384) >> 15)
-            * ((((((v_x1 * (int32_t)calib.dig_H6) >> 10)
+            * (((((((v_x1 * (int32_t)calib.dig_H6) >> 10)
                  * (((v_x1 * (int32_t)calib.dig_H3) >> 11) + (int32_t)32768)) >> 10)
-                 + (int32_t)2097152) * (int32_t)calib.dig_H2 + 8192) >> 14);
+                 + (int32_t)2097152) * (int32_t)calib.dig_H2 + 8192) >> 14));
     v_x1 = v_x1 - (((((v_x1 >> 15) * (v_x1 >> 15)) >> 7) * (int32_t)calib.dig_H1) >> 4);
     v_x1 = (v_x1 < 0) ? 0 : v_x1;
     v_x1 = (v_x1 > 419430400) ? 419430400 : v_x1;
-    printf("humidity v_x1_final=%d\n", v_x1);
     return (uint32_t)(v_x1 >> 12);   /* %RH x1024 */
 }
 
@@ -205,15 +205,134 @@ static int read_sensor(float *temp, float *humidity) {
     int32_t adc_T = ((int32_t)data[0] << 12) | ((int32_t)data[1] << 4) | (data[2] >> 4);
     int32_t adc_H = ((int32_t)data[3] << 8) | data[4];
 
-    printf("raw: data[3]=0x%02X data[4]=0x%02X adc_H=%d adc_T=%d\n", data[3], data[4], adc_H, adc_T);
-
     int32_t  temp_x100  = bme280_compensate_temp(adc_T);
-    printf("t_fine=%d\n", t_fine);
     uint32_t hum_x1024  = bme280_compensate_humidity(adc_H);
 
     *temp     = temp_x100 / 100.0f;
     *humidity = hum_x1024 / 1024.0f;
     return 0;
+}
+
+/* ---------------- SSD1306 OLED (128x64) on the same I2C bus ---------------- */
+#define OLED_ADDR   0x3C
+#define OLED_W      128
+#define OLED_H      64
+#define OLED_BUFSZ  ((OLED_W * OLED_H) / 8)
+#define SSD1306_CMD 0x00
+#define SSD1306_DAT 0x40
+
+static int     oled_fd = -1;
+static uint8_t oled_buf[OLED_BUFSZ];
+
+/* 5x7 font, ASCII 0x20 (space) .. 0x5A ('Z'); each glyph is 5 column bytes (LSB=top) */
+static const uint8_t oled_font[][5] = {
+    {0x00,0x00,0x00,0x00,0x00}, /* 0x20   */  {0x00,0x00,0x5F,0x00,0x00}, /* ! */
+    {0x00,0x07,0x00,0x07,0x00}, /* " */       {0x14,0x7F,0x14,0x7F,0x14}, /* # */
+    {0x24,0x2A,0x7F,0x2A,0x12}, /* $ */       {0x23,0x13,0x08,0x64,0x62}, /* % */
+    {0x36,0x49,0x55,0x22,0x50}, /* & */       {0x00,0x05,0x03,0x00,0x00}, /* ' */
+    {0x00,0x1C,0x22,0x41,0x00}, /* ( */       {0x00,0x41,0x22,0x1C,0x00}, /* ) */
+    {0x14,0x08,0x3E,0x08,0x14}, /* * */       {0x08,0x08,0x3E,0x08,0x08}, /* + */
+    {0x00,0x50,0x30,0x00,0x00}, /* , */       {0x08,0x08,0x08,0x08,0x08}, /* - */
+    {0x00,0x60,0x60,0x00,0x00}, /* . */       {0x20,0x10,0x08,0x04,0x02}, /* / */
+    {0x3E,0x51,0x49,0x45,0x3E}, /* 0 */       {0x00,0x42,0x7F,0x40,0x00}, /* 1 */
+    {0x42,0x61,0x51,0x49,0x46}, /* 2 */       {0x21,0x41,0x45,0x4B,0x31}, /* 3 */
+    {0x18,0x14,0x12,0x7F,0x10}, /* 4 */       {0x27,0x45,0x45,0x45,0x39}, /* 5 */
+    {0x3C,0x4A,0x49,0x49,0x30}, /* 6 */       {0x01,0x71,0x09,0x05,0x03}, /* 7 */
+    {0x36,0x49,0x49,0x49,0x36}, /* 8 */       {0x06,0x49,0x49,0x29,0x1E}, /* 9 */
+    {0x00,0x36,0x36,0x00,0x00}, /* : */       {0x00,0x56,0x36,0x00,0x00}, /* ; */
+    {0x08,0x14,0x22,0x41,0x00}, /* < */       {0x14,0x14,0x14,0x14,0x14}, /* = */
+    {0x00,0x41,0x22,0x14,0x08}, /* > */       {0x02,0x01,0x51,0x09,0x06}, /* ? */
+    {0x32,0x49,0x79,0x41,0x3E}, /* @ */       {0x7E,0x11,0x11,0x11,0x7E}, /* A */
+    {0x7F,0x49,0x49,0x49,0x36}, /* B */       {0x3E,0x41,0x41,0x41,0x22}, /* C */
+    {0x7F,0x41,0x41,0x22,0x1C}, /* D */       {0x7F,0x49,0x49,0x49,0x41}, /* E */
+    {0x7F,0x09,0x09,0x09,0x01}, /* F */       {0x3E,0x41,0x49,0x49,0x7A}, /* G */
+    {0x7F,0x08,0x08,0x08,0x7F}, /* H */       {0x00,0x41,0x7F,0x41,0x00}, /* I */
+    {0x20,0x40,0x41,0x3F,0x01}, /* J */       {0x7F,0x08,0x14,0x22,0x41}, /* K */
+    {0x7F,0x40,0x40,0x40,0x40}, /* L */       {0x7F,0x02,0x0C,0x02,0x7F}, /* M */
+    {0x7F,0x04,0x08,0x10,0x7F}, /* N */       {0x3E,0x41,0x41,0x41,0x3E}, /* O */
+    {0x7F,0x09,0x09,0x09,0x06}, /* P */       {0x3E,0x41,0x51,0x21,0x5E}, /* Q */
+    {0x7F,0x09,0x19,0x29,0x46}, /* R */       {0x46,0x49,0x49,0x49,0x31}, /* S */
+    {0x01,0x01,0x7F,0x01,0x01}, /* T */       {0x3F,0x40,0x40,0x40,0x3F}, /* U */
+    {0x1F,0x20,0x40,0x20,0x1F}, /* V */       {0x3F,0x40,0x38,0x40,0x3F}, /* W */
+    {0x63,0x14,0x08,0x14,0x63}, /* X */       {0x07,0x08,0x70,0x08,0x07}, /* Y */
+    {0x61,0x51,0x49,0x45,0x43}, /* Z */
+};
+
+static int oled_cmd(uint8_t c) {
+    uint8_t b[2] = { SSD1306_CMD, c };
+    return (write(oled_fd, b, 2) == 2) ? 0 : -1;
+}
+
+static int oled_data(const uint8_t *d, size_t len) {
+    uint8_t b[17];
+    b[0] = SSD1306_DAT;
+    memcpy(b + 1, d, len);
+    return (write(oled_fd, b, len + 1) == (ssize_t)(len + 1)) ? 0 : -1;
+}
+
+static int oled_init(void) {
+    oled_fd = open(I2C_BUS, O_RDWR);
+    if (oled_fd < 0) { perror("OLED: open i2c"); return -1; }
+    if (ioctl(oled_fd, I2C_SLAVE, OLED_ADDR) < 0) {
+        perror("OLED: set addr");
+        close(oled_fd);
+        oled_fd = -1;
+        return -1;
+    }
+    /* Standard SSD1306 128x64 init sequence (each byte issued as a command) */
+    static const uint8_t init_seq[] = {
+        0xAE, 0xD5,0x80, 0xA8,0x3F, 0xD3,0x00, 0x40, 0x8D,0x14,
+        0x20,0x00, 0xA1, 0xC8, 0xDA,0x12, 0x81,0xCF, 0xD9,0xF1,
+        0xDB,0x40, 0xA4, 0xA6, 0xAF
+    };
+    for (size_t i = 0; i < sizeof(init_seq); i++)
+        if (oled_cmd(init_seq[i]) < 0) return -1;
+    printf("OLED initialized\n");
+    return 0;
+}
+
+static void oled_clear(void) { memset(oled_buf, 0, OLED_BUFSZ); }
+
+static void oled_flush(void) {
+    oled_cmd(0x22); oled_cmd(0); oled_cmd(7);           /* page addr 0..7 */
+    oled_cmd(0x21); oled_cmd(0); oled_cmd(OLED_W - 1);  /* col addr 0..127 */
+    for (int i = 0; i < OLED_BUFSZ; i += 16)
+        oled_data(&oled_buf[i], 16);
+}
+
+static void oled_pixel(int x, int y) {
+    if (x < 0 || x >= OLED_W || y < 0 || y >= OLED_H) return;
+    oled_buf[x + (y / 8) * OLED_W] |= (1 << (y % 8));
+}
+
+static void oled_char(int x, int y, char c, int scale) {
+    if (c < 0x20 || c > 0x5A) c = 0x20;   /* font covers space..'Z' only */
+    const uint8_t *g = oled_font[c - 0x20];
+    for (int col = 0; col < 5; col++)
+        for (int row = 0; row < 7; row++)
+            if (g[col] & (1 << row))
+                for (int sx = 0; sx < scale; sx++)
+                    for (int sy = 0; sy < scale; sy++)
+                        oled_pixel(x + col * scale + sx, y + row * scale + sy);
+}
+
+static void oled_string(int x, int y, const char *s, int scale) {
+    for (; *s; s++) {
+        oled_char(x, y, *s, scale);
+        x += 6 * scale;   /* 5px glyph + 1px gap */
+    }
+}
+
+static void oled_show(float temp, float humidity) {
+    char tbuf[16], hbuf[16];
+    /* font is uppercase-only; keep labels to digits/letters/punctuation it covers */
+    snprintf(tbuf, sizeof(tbuf), "T:%.1fC", temp);
+    snprintf(hbuf, sizeof(hbuf), "H:%.1f%%", humidity);
+    oled_clear();
+    oled_string(0, 0,  "ZYNQ BME280", 1);
+    oled_string(4, 20, tbuf, 2);
+    oled_string(4, 44, hbuf, 2);
+    oled_flush();
 }
 
 int main(void) {
@@ -225,6 +344,11 @@ int main(void) {
         fprintf(stderr, "Failed to initialize BME280\n");
         return 1;
     }
+
+    /* OLED is optional: warn but keep publishing if it isn't present */
+    int have_oled = (oled_init() == 0);
+    if (!have_oled)
+        fprintf(stderr, "OLED not available — continuing without local display\n");
 
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
@@ -262,6 +386,9 @@ int main(void) {
             continue;
         }
 
+        if (have_oled)
+            oled_show(temp, humidity);
+
         int len = snprintf(payload, sizeof(payload),
                            "{\"temperature\":%.2f,\"humidity\":%.2f}",
                            temp, humidity);
@@ -289,6 +416,14 @@ int main(void) {
 
     MQTTClient_disconnect(client, 1000);
     MQTTClient_destroy(&client);
+
+    if (have_oled) {
+        oled_clear();
+        oled_flush();
+        oled_cmd(0xAE);        /* display off */
+        close(oled_fd);
+    }
+
     printf("Disconnected.\n");
     return 0;
 }
