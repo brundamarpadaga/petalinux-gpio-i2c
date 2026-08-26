@@ -2,7 +2,7 @@
 
 A PetaLinux project that brings up embedded Linux on the Zybo Z7-20 board, integrating custom FPGA peripherals (AXI GPIO, AXI IIC) with Linux kernel drivers. Features LED control via PL GPIO and an SSD1306 OLED display driven over I2C.
 
-**Current expansion in progress:** Adding BME280 temperature/humidity sensor + Ethernet to publish sensor data to the cloud via MQTT (HiveMQ).
+**Status:** BME280 temperature/humidity sensor is wired, verified on hardware, and publishing to HiveMQ Cloud over MQTT/TLS every 5 seconds, with live readings mirrored on the OLED. **Current expansion in progress:** a MATLAB live dashboard that subscribes to the HiveMQ topic and plots temperature/humidity in real time.
 
 ---
 
@@ -16,7 +16,8 @@ A PetaLinux project that brings up embedded Linux on the Zybo Z7-20 board, integ
 - [LED Control via sysfs GPIO](#led-control-via-sysfs-gpio)
 - [I2C / OLED Setup](#i2c--oled-setup)
 - [Ethernet Setup](#ethernet-setup)
-- [IoT Expansion: BME280 + MQTT (In Progress)](#iot-expansion-bme280--mqtt-in-progress)
+- [IoT Expansion: BME280 + MQTT](#iot-expansion-bme280--mqtt)
+- [MATLAB Live Dashboard (In Progress)](#matlab-live-dashboard-in-progress)
 - [Debugging Reference](#debugging-reference)
 - [Key Learnings](#key-learnings)
 
@@ -28,11 +29,9 @@ A PetaLinux project that brings up embedded Linux on the Zybo Z7-20 board, integ
 - Zybo Z7-20 development board
 - MicroSD card (8 GB+)
 - SSD1306 OLED display (I2C, address `0x3C`) connected to Pmod JD
-- USB-UART cable for serial console
-
-**To add for IoT expansion:**
-- BME280 temperature/humidity sensor (I2C, address `0x76` or `0x77`)
+- BME280 temperature/humidity sensor (I2C, address `0x76`) — shares the same I2C bus as the OLED
 - Cat5e/Cat6 Ethernet cable (any standard cable, connect to router/switch)
+- USB-UART cable for serial console
 
 ---
 
@@ -209,15 +208,19 @@ ping -c 4 8.8.8.8
 | DHCP fails / no IP | No DHCP server on network | Connect to router, not directly to PC |
 | PHY not detected | PHY driver missing | Enable `CONFIG_MICREL_PHY` in kernel config |
 
-### Status: ⏳ Pending (need Ethernet cable)
+### Status: ✅ Working — `eth0` up, DHCP lease obtained, internet reachable
 
 ---
 
-## IoT Expansion: BME280 + MQTT (In Progress)
+## IoT Expansion: BME280 + MQTT
 
 ### Goal
 
-Read temperature and humidity from a BME280 sensor over I2C and publish the data to HiveMQ Cloud broker via MQTT over Ethernet, on a timed interval. Optionally display current readings on the SSD1306 OLED locally.
+Read temperature and humidity from a BME280 sensor over I2C and publish the data to HiveMQ Cloud broker via MQTT over Ethernet, on a timed interval. Display current readings on the SSD1306 OLED locally at the same time.
+
+### Status: ✅ Working end-to-end on hardware
+
+Sensor readings (temperature and humidity), MQTT/TLS publish to HiveMQ Cloud, and the OLED readout are all confirmed working on the board.
 
 ### Target Architecture
 
@@ -240,15 +243,14 @@ Read temperature and humidity from a BME280 sensor over I2C and publish the data
 ### Progress
 
 - [x] **Step 1 — Verify Ethernet** — `eth0` confirmed working, DHCP lease obtained, internet reachable
-- [ ] **Step 2 — Wire BME280** to a Pmod connector (same I2C bus or a second one)
-  - Pull SDO pin to GND → I2C address `0x76`
-  - Pull SDO pin to VCC → I2C address `0x77`
-- [ ] **Step 3 — Detect sensor on I2C bus**
+- [x] **Step 2 — Wire BME280** to Pmod JD, same I2C bus as the OLED
+  - SDO pin pulled to GND → I2C address `0x76` (confirmed via `i2cdetect`, chip ID register reads `0x60`, genuine BME280)
+- [x] **Step 3 — Detect sensor on I2C bus**
   ```bash
   i2cdetect -y 1
-  # Should show 0x76 or 0x77
+  # Shows 0x3C (OLED) and 0x76 (BME280)
   ```
-- [ ] **Step 4 — Write BME280 userspace reader** using `i2c-dev`
+- [x] **Step 4 — Write BME280 userspace reader** using `i2c-dev`
   - Read raw ADC values from BME280 registers
   - Apply BME280 compensation formula from datasheet (section 4.2.3)
   - Same pattern as the SSD1306 app, but reading data instead of writing display commands
@@ -258,7 +260,7 @@ Read temperature and humidity from a BME280 sensor over I2C and publish the data
   - `ca-certificates` added to rootfs for server certificate verification
   - Added to `project-spec/meta-user/conf/user-rootfsconfig`
 - [x] **Step 6 — Write mqtt-sensor-app** (`recipes-apps/mqtt-sensor-app/`)
-  - Publishes mock sensor data (`temp=25.0°C`, `humidity=60.0%`) as JSON to topic `zynq/sensor/bme280`
+  - Publishes live BME280 readings as JSON to topic `zynq/sensor/bme280`
   - Connects to HiveMQ Cloud over TLS (port 8883) with username/password auth
   - Credentials stored in `/etc/mqtt-sensor.conf` — not hardcoded, gitignored
   - CA cert path explicitly set: `ssl_opts.trustStore = "/etc/ssl/certs/ca-certificates.crt"`
@@ -273,8 +275,8 @@ Read temperature and humidity from a BME280 sensor over I2C and publish the data
   - Free cluster provisioned at `console.hivemq.cloud`
   - Subscribe to `zynq/sensor/bme280` in the HiveMQ web client to monitor live data
 - [x] **Step 8 — Test end-to-end** — deployed binary to board, confirmed publish reaches HiveMQ (see "TLS publish failing" below for the blocker that had to be fixed first)
-- [x] **Step 9 — Write BME280 driver** — `read_sensor()` now does real forced-mode I2C reads + Bosch datasheet §4.2.3 compensation (temp + humidity; pressure intentionally skipped since it's not published). Written without hardware in hand — **not yet verified on a real sensor**. Before trusting readings: run `i2cdetect -y 1` to confirm the sensor answers at `0x76` (update `BME280_ADDR` to `0x77` in `mqtt-sensor-app.c` if it's wired with SDO pulled to VCC instead), then check for `BME280: unexpected chip ID` in the app's output — that means address/wiring is wrong before compensation math is even a question.
-- [ ] **Step 10 (optional) — Display readings on OLED** — show temp/humidity on SSD1306 while simultaneously publishing to cloud
+- [x] **Step 9 — Write BME280 driver** — `read_sensor()` does real forced-mode I2C reads + Bosch datasheet §4.2.3 compensation (temp + humidity; pressure intentionally skipped since it's not published). **Verified on hardware** — temperature was correct from the start; humidity was stuck near 0% until the integer-overflow bug below was found and fixed (see "Humidity stuck near 0%").
+- [x] **Step 10 — Display readings on OLED** — `mqtt-sensor-app` now also drives the SSD1306 (reusing the same I2C bus, separate fd/address from the BME280) and shows a live `T:`/`H:` readout on every publish cycle, while continuing to publish to HiveMQ. OLED init is non-fatal: if the display isn't present, publishing continues without it.
 
 ### Troubleshooting: TLS publish failing with `rc=-1`
 
@@ -293,6 +295,16 @@ The `ntpdate` package (still enabled via `user-rootfsconfig`) provides the binar
 
 **Verified on hardware:** with the clock deliberately forced stale (`date -s "2018-03-09 12:00:00"`) then `ifdown eth0 && ifup eth0`, the clock self-corrected the moment `udhcpc` reached the `bound` state, with zero manual intervention. Next step: rebuild + reflash to bake this in, then confirm it also fires from a cold boot.
 
+### Troubleshooting: Humidity stuck near 0%
+
+Temperature readings were correct from the start, but humidity always reported ~0.02%RH regardless of actual conditions.
+
+**Root cause:** a 32-bit integer overflow in `bme280_compensate_humidity()`, caused by C operator precedence. The Bosch datasheet's reference formula requires the `>> 14` shift to apply to only the right-hand multiplicand of a product, but the original code was written as `(L * R) >> 14`. Since `*` binds tighter than `>>` in C, this is what it already did syntactically — the bug was that the *values* being multiplied together before any shift overflowed `int32_t` (~3.2×10¹² before wraparound vs. a ~2.1×10⁹ ceiling), producing garbage. Reproduced exactly on a host build: the buggy expression gave `v_x1_final = 72414` (→ 0.02%RH, matching the board); adding one parenthesis to shift the smaller intermediate value first before multiplying kept everything inside `int32_t` range and gave `194581384` (→ 46.39%RH, a sane reading).
+
+**Fix:** re-parenthesized the compensation formula so the `>> 14` divides down a sub-term before the final multiplication, matching the Bosch reference exactly (`project-spec/meta-user/recipes-apps/mqtt-sensor-app/files/mqtt-sensor-app.c`, `bme280_compensate_humidity()`). Verified against reproduced board output in a standalone host test before touching the on-target build.
+
+**Lesson:** for tricky fixed-point/bit-shift math, reproduce the exact expression in a small host program with the real input values rather than hand-tracing precedence — it's easy to convince yourself the code is correct by inspection when the actual failure is a magnitude/overflow issue, not a logic error.
+
 ### New Files Added
 
 ```
@@ -300,7 +312,7 @@ project-spec/meta-user/
 ├── recipes-apps/mqtt-sensor-app/
 │   ├── mqtt-sensor-app.bb              # BitBake recipe (depends on paho-mqtt-c)
 │   └── files/
-│       ├── mqtt-sensor-app.c           # Publisher app source
+│       ├── mqtt-sensor-app.c           # Publisher app source (BME280 read + OLED display + MQTT/TLS publish)
 │       ├── Makefile                    # Links -lpaho-mqtt3cs (SSL variant)
 │       ├── mqtt-sensor.conf            # Real credentials — gitignored
 │       └── mqtt-sensor.conf.example    # Placeholder template — tracked in git
@@ -317,6 +329,33 @@ project-spec/meta-user/
 - No Vivado changes needed for Ethernet — GEM0 is PS-native
 - BME280 uses same I2C interface already proven with SSD1306
 - Linking `-lpaho-mqtt3cs` (not `-lpaho-mqtt3c`) is required — the `s` suffix means SSL
+
+---
+
+## MATLAB Live Dashboard (In Progress)
+
+### Goal
+
+A live, auto-updating MATLAB plot of temperature/humidity, subscribed directly to the HiveMQ Cloud topic (`zynq/sensor/bme280`), that launches automatically on the host desktop at Windows logon — no manual steps, no PNG snapshots.
+
+### Design
+
+- MATLAB `mqttclient` (Industrial Communication Toolbox) connects over TLS to HiveMQ Cloud and subscribes to the sensor topic.
+- A visible figure with `animatedline` (dual `yyaxis` for temp + humidity) is updated live via `addpoints` / `drawnow limitrate` on a rolling time window.
+- A supervisor loop wraps the connection: if the broker connection drops or the FPGA board is powered off, the plot shows a "waiting for board" status and keeps retrying with backoff — the MQTT connection to the broker is independent of the board being on, so no MATLAB restart is needed when the board comes back.
+- HiveMQ credentials are read via `getenv('HIVEMQ_PASSWORD')` (Windows user environment variable), not hardcoded in the script.
+- Auto-launch is intended to be handled by **Windows Task Scheduler**: a `LogonTrigger` running `matlab.exe -nosplash -r "mqtt_dashboard"` as the interactive user (needed so the figure window can actually appear).
+
+### Status: ⏳ Script verified interactively; Task Scheduler auto-launch not yet working
+
+- [x] Live dashboard script written and run manually — confirmed connecting to HiveMQ and plotting live data correctly.
+- [x] Reconnect/backoff and "board offline" handling implemented in the supervisor loop (not yet stress-tested end-to-end with the board actually power-cycled mid-session).
+- [ ] **Task Scheduler auto-launch at logon — currently not firing.** Task has been imported, but MATLAB does not start automatically at system start. Not yet root-caused; next debugging pass should check the task's History tab for a logged error, confirm "Run only when user is logged on" is selected (a live figure needs an interactive session), and verify the `matlab.exe` path / working directory in the imported task match the real install.
+- [ ] Decide on a license-independent long-term path: `MATLAB Compiler` (needed to produce a standalone `.exe` that runs on the free MATLAB Runtime without a license) is **not** in the current MATLAB toolbox install, so that option is blocked unless it can be added to the license. Alternatives under consideration: keep relying on a permanent/student MATLAB license for Task Scheduler + full `matlab.exe`, or move the live visualization to ThingSpeak (MathWorks' cloud IoT platform, which runs MATLAB visualizations cloud-side with no local license needed).
+
+### Security Note
+
+A HiveMQ Cloud password was at one point pasted in plaintext into a debugging session for this project. **That credential should be rotated in the HiveMQ Cloud console** and the new value used for the `HIVEMQ_PASSWORD` environment variable (and `/etc/mqtt-sensor.conf` on the board) going forward, if this hasn't been done already.
 
 ---
 
